@@ -60,11 +60,24 @@ def set_due(progress: dict, word: str, when: datetime | None):
     progress[word]["next_due"] = when.isoformat(timespec="seconds") if when else None
 
 def get_due(progress: dict, word: str):
+    """Возвращает datetime или None, даже если в прогрессе лежит строка/пусто."""
     v = progress.get(word, {}).get("next_due")
-    try:
-        return datetime.fromisoformat(v) if v else None
-    except Exception:
+    if not v:
         return None
+    if isinstance(v, datetime):
+        return v
+    if isinstance(v, (int, float)):
+        return None
+    if isinstance(v, str):
+        v = v.strip()
+        if not v:
+            return None
+        try:
+            # стандартный ISO 'YYYY-MM-DDTHH:MM:SS'
+            return datetime.fromisoformat(v.replace("Z", ""))  # на всякий случай убираем Z
+        except Exception:
+            return None
+    return None
 
 def pick_review(progress: dict) -> list[str]:
     now = datetime.now()
@@ -125,18 +138,27 @@ def cloud_load_progress(class_code: str, username: str) -> dict:
         st.warning(f"Не удалось прочитать прогресс из Sheets: {e}")
         rows = []
 
-    prog = {}
+    prog: dict[str, dict] = {}
     for row in rows:
-        w = row["word"]
+        w = str(row.get("word", "")).strip()
+        if not w:
+            continue
         if w not in prog:
             prog[w] = {"errors": 0, "success": 0, "last_seen": None, "next_due": None}
-        if row.get("success") in (True, "true", "True", "1"):
+
+        # success может быть True/False или строка "true"/"false"
+        success_flag = str(row.get("success")).lower() in ("true", "1", "yes")
+        if success_flag:
             prog[w]["success"] += 1
         else:
             prog[w]["errors"] += 1
-        prog[w]["last_seen"] = row.get("last_seen") or row.get("timestamp")
-        prog[w]["next_due"] = row.get("next_due")
+
+        # даты — как строки; пусть лежат строками, а get_due всё распарсит
+        prog[w]["last_seen"] = row.get("last_seen") or row.get("timestamp") or None
+        prog[w]["next_due"]  = row.get("next_due") or None
+
     return prog
+
 
 # ---------- Единый слой сохранения/загрузки ----------
 def load_progress(class_code: str, username: str) -> dict:
@@ -173,6 +195,18 @@ def save_event_and_progress(class_code: str, username: str, word: str, progress:
     else:
         local_save_progress(class_code, username, progress)
         local_append_event(row)
+        
+def pick_review(progress: dict) -> list[str]:
+    now = datetime.now()
+    cand = []
+    for w, stt in progress.items():
+        due = get_due(progress, w)  # теперь вернёт datetime или None
+        errs = int(stt.get("errors", 0) or 0)
+        succ = int(stt.get("success", 0) or 0)
+        if errs > succ and (due is None or due <= now):
+            cand.append(w)
+    random.shuffle(cand)
+    return cand
 
 # ---------- UI ----------
 st.set_page_config(page_title="Пропущенная гласная — онлайн", page_icon="📝")
